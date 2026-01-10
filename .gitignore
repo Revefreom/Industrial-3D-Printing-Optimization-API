@@ -1,0 +1,8 @@
+__pycache__/
+.venv/
+.antigravity/
+.claude/
+.gemini/
+*.db
+settings.json
+.DS_Store
