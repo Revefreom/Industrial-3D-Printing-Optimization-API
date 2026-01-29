@@ -3,3 +3,9 @@ __pycache__/
 .git/
 .env
 .antigravity/
+.gemini/
+.claude/
+*.db
+*.pyc
+.pytest_cache/
+test_api.py

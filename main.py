@@ -10,16 +10,22 @@ Formül: C_total = Σ(M·P) + E + A·α
 - α: Risk/Tekrar katsayısı
 """
 
+import os
+import tempfile
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from typing import List, Optional
+from contextlib import asynccontextmanager
 
+from config import get_settings, logger
 from logic import CostManager
 from database import (
     get_printer_names, get_customer_names, add_printer, add_customer,
     get_all_printers, get_all_customers, delete_printer, delete_customer,
     get_company_info, update_company_info, get_printer, reset_printer_component,
-    update_printer_lifespan, get_all_invoices, get_invoice, get_customer
+    update_printer_lifespan, get_all_invoices, get_invoice, get_customer,
+    update_printer, update_customer, DatabaseError
 )
 from schemas import (
     CostCalculationRequest, CostCalculationResponse, CostBreakdown,
@@ -28,15 +34,26 @@ from schemas import (
     MaterialCreate, MaterialResponse,
     CurrencyRates, EnergySettings, CostParameters, AllSettings,
     InvoiceCreate, InvoiceResponse, InvoiceListItem,
-    CompanyInfo, MessageResponse
+    CompanyInfo, MessageResponse, PrinterUpdate, CustomerUpdate
 )
+from export import export_to_pdf, export_to_word
+
+settings = get_settings()
 
 # =============================================================================
 # FastAPI Application
 # =============================================================================
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Uygulama yaşam döngüsü - başlatılmasında ve kapatılmasında çalışır."""
+    logger.info("API başlatılıyor...")
+    yield
+    logger.info("API kapatılıyor...")
+
+
 app = FastAPI(
-    title="3D Yazıcı Maliyet Hesaplayıcı API",
+    title=settings.API_TITLE,
     description="""
 ## 3D Baskı Maliyet Hesaplama Servisi
 
@@ -54,12 +71,14 @@ C_total = Σ(M·P) + E + A·α
 - **α**: Risk/Tekrar katsayısı (ilk baskı: %15, tekrar: %2)
 
 ### Özellikler
-- ✅ Malzeme, enerji, amortisman hesaplama
-- ✅ Yazıcı parça ömrü takibi
-- ✅ Müşteri ve fatura yönetimi
-- ✅ Docker uyumlu (headless)
+-  Malzeme, enerji, amortisman hesaplama
+-  Yazıcı parça ömrü takibi
+-  Müşteri ve fatura yönetimi
+-  PDF/Word export
+-  Docker uyumlu (headless)
     """,
-    version="2.0.0",
+    version=settings.API_VERSION,
+    lifespan=lifespan,
     contact={
         "name": "3D Yazıcı Maliyet Hesaplayıcı",
     }
@@ -68,7 +87,7 @@ C_total = Σ(M·P) + E + A·α
 # CORS Middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -361,6 +380,43 @@ async def update_lifespan(printer_id: int, request: PrinterLifespanUpdate):
     )
 
 
+@app.put(
+    "/printers/{printer_id}",
+    response_model=MessageResponse,
+    tags=["Yazıcılar"],
+    summary="Yazıcı bilgilerini güncelle"
+)
+async def update_printer_info(printer_id: int, request: PrinterUpdate):
+    """Yazıcı bilgilerini günceller."""
+    logger.info(f"PUT /printers/{printer_id} - Yazıcı güncelleniyor")
+    
+    p = get_printer(printer_id)
+    if not p:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Yazıcı bulunamadı: ID {printer_id}"
+        )
+    
+    updated = update_printer(
+        printer_id,
+        name=request.name,
+        brand=request.brand,
+        model=request.model,
+        nozzle_lifespan=request.nozzle_lifespan_hours,
+        nozzle_price=request.nozzle_price,
+        heater_lifespan=request.heater_lifespan_hours,
+        heater_price=request.heater_price,
+        motor_lifespan=request.motor_lifespan_hours,
+        motor_price=request.motor_price,
+        maintenance_cost=request.maintenance_cost
+    )
+    
+    if not updated:
+        return MessageResponse(message="Güncellenecek alan belirtilmedi", success=False)
+    
+    return MessageResponse(message=f"Yazıcı güncellendi: ID {printer_id}")
+
+
 # =============================================================================
 # CUSTOMER ENDPOINTS
 # =============================================================================
@@ -453,6 +509,39 @@ async def remove_customer(customer_id: int):
     
     delete_customer(customer_id)
     return MessageResponse(message=f"Müşteri silindi: {c[1]}")
+
+
+@app.put(
+    "/customers/{customer_id}",
+    response_model=MessageResponse,
+    tags=["Müşteriler"],
+    summary="Müşteri bilgilerini güncelle"
+)
+async def update_customer_info(customer_id: int, request: CustomerUpdate):
+    """Müşteri bilgilerini günceller."""
+    logger.info(f"PUT /customers/{customer_id} - Müşteri güncelleniyor")
+    
+    c = get_customer(customer_id)
+    if not c:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Müşteri bulunamadı: ID {customer_id}"
+        )
+    
+    updated = update_customer(
+        customer_id,
+        name=request.name,
+        company=request.company,
+        address=request.address,
+        phone=request.phone,
+        email=request.email,
+        tax_number=request.tax_number
+    )
+    
+    if not updated:
+        return MessageResponse(message="Güncellenecek alan belirtilmedi", success=False)
+    
+    return MessageResponse(message=f"Müşteri güncellendi: ID {customer_id}")
 
 
 # =============================================================================
@@ -712,6 +801,138 @@ async def get_invoice_detail(invoice_id: int):
         total_cost=inv[15] or 0,
         currency=inv[16] or "TRY"
     )
+
+
+@app.get(
+    "/invoices/{invoice_id}/export/pdf",
+    tags=["Faturalar"],
+    summary="Faturayı PDF olarak indir",
+    response_class=FileResponse
+)
+async def export_invoice_pdf(invoice_id: int):
+    """Faturayı PDF formatında indirir."""
+    logger.info(f"GET /invoices/{invoice_id}/export/pdf - PDF export")
+    
+    inv = get_invoice(invoice_id)
+    if not inv:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Fatura bulunamadı: ID {invoice_id}"
+        )
+    
+    # Fatura verisi hazırla
+    invoice_data = {
+        "invoice_number": inv[1],
+        "date": inv[17].split(" ")[0] if inv[17] else "",
+        "customer_name": inv[18] or "",
+        "customer_company": inv[19] or "",
+        "customer_address": inv[20] or "",
+        "printer_name": inv[24] or "",
+        "material_name": inv[4] or "",
+        "print_weight_g": inv[5] or 0,
+        "print_time_hours": inv[6] or 0,
+        "is_first_print": bool(inv[7]),
+        "material_cost": inv[8] or 0,
+        "energy_cost": inv[9] or 0,
+        "depreciation_cost": inv[10] or 0,
+        "preparation_cost": inv[11] or 0,
+        "failure_risk_cost": inv[12] or 0,
+        "special_discount": inv[13] or 0,
+        "special_discount_note": inv[14] or "",
+        "total_cost": inv[15] or 0,
+        "currency": inv[16] or "TRY"
+    }
+    
+    # Şirket bilgilerini al
+    company_info_data = get_company_info()
+    company_info = {
+        "name": company_info_data[1] if company_info_data else "",
+        "address": company_info_data[2] if company_info_data else "",
+        "phone": company_info_data[3] if company_info_data else "",
+        "email": company_info_data[4] if company_info_data else "",
+        "tax_number": company_info_data[5] if company_info_data else ""
+    }
+    
+    # Geçici dosyaya PDF oluştur
+    output_path = os.path.join(tempfile.gettempdir(), f"fatura_{inv[1]}.pdf")
+    try:
+        export_to_pdf(invoice_data, company_info, output_path)
+        return FileResponse(
+            output_path,
+            media_type="application/pdf",
+            filename=f"fatura_{inv[1]}.pdf"
+        )
+    except ImportError as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
+
+
+@app.get(
+    "/invoices/{invoice_id}/export/word",
+    tags=["Faturalar"],
+    summary="Faturayı Word olarak indir",
+    response_class=FileResponse
+)
+async def export_invoice_word(invoice_id: int):
+    """Faturayı Word formatında indirir."""
+    logger.info(f"GET /invoices/{invoice_id}/export/word - Word export")
+    
+    inv = get_invoice(invoice_id)
+    if not inv:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Fatura bulunamadı: ID {invoice_id}"
+        )
+    
+    # Fatura verisi hazırla
+    invoice_data = {
+        "invoice_number": inv[1],
+        "date": inv[17].split(" ")[0] if inv[17] else "",
+        "customer_name": inv[18] or "",
+        "customer_company": inv[19] or "",
+        "customer_address": inv[20] or "",
+        "printer_name": inv[24] or "",
+        "material_name": inv[4] or "",
+        "print_weight_g": inv[5] or 0,
+        "print_time_hours": inv[6] or 0,
+        "is_first_print": bool(inv[7]),
+        "material_cost": inv[8] or 0,
+        "energy_cost": inv[9] or 0,
+        "depreciation_cost": inv[10] or 0,
+        "preparation_cost": inv[11] or 0,
+        "failure_risk_cost": inv[12] or 0,
+        "special_discount": inv[13] or 0,
+        "special_discount_note": inv[14] or "",
+        "total_cost": inv[15] or 0,
+        "currency": inv[16] or "TRY"
+    }
+    
+    # Şirket bilgilerini al
+    company_info_data = get_company_info()
+    company_info = {
+        "name": company_info_data[1] if company_info_data else "",
+        "address": company_info_data[2] if company_info_data else "",
+        "phone": company_info_data[3] if company_info_data else "",
+        "email": company_info_data[4] if company_info_data else "",
+        "tax_number": company_info_data[5] if company_info_data else ""
+    }
+    
+    # Geçici dosyaya Word oluştur
+    output_path = os.path.join(tempfile.gettempdir(), f"fatura_{inv[1]}.docx")
+    try:
+        export_to_word(invoice_data, company_info, output_path)
+        return FileResponse(
+            output_path,
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            filename=f"fatura_{inv[1]}.docx"
+        )
+    except ImportError as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
 
 
 # =============================================================================

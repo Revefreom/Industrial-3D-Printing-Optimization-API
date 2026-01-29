@@ -9,8 +9,10 @@ from database import (
     get_printer, update_printer_lifespan, get_company_info,
     save_invoice, get_customer
 )
+from config import get_settings, logger
 
-SETTINGS_FILE = "settings.json"
+settings = get_settings()
+SETTINGS_FILE = settings.SETTINGS_FILE
 
 
 class CostManager:

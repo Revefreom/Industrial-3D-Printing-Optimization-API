@@ -6,3 +6,6 @@ __pycache__/
 *.db
 settings.json
 .DS_Store
+.pytest_cache/
+*.pyc
+.env

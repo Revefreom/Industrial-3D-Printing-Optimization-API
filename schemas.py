@@ -107,6 +107,20 @@ class PrinterLifespanUpdate(BaseModel):
     hours_used: float = Field(..., gt=0, description="Kullanılan saat")
 
 
+class PrinterUpdate(BaseModel):
+    """Yazıcı güncelleme modeli - tüm alanlar opsiyonel."""
+    name: Optional[str] = Field(None, min_length=1, description="Yazıcı adı")
+    brand: Optional[str] = Field(None, description="Marka")
+    model: Optional[str] = Field(None, description="Model")
+    nozzle_lifespan_hours: Optional[float] = Field(None, gt=0, description="Nozzle ömrü (saat)")
+    nozzle_price: Optional[float] = Field(None, ge=0, description="Nozzle fiyatı (₺)")
+    heater_lifespan_hours: Optional[float] = Field(None, gt=0, description="Isıtıcı ömrü (saat)")
+    heater_price: Optional[float] = Field(None, ge=0, description="Isıtıcı fiyatı (₺)")
+    motor_lifespan_hours: Optional[float] = Field(None, gt=0, description="Motor ömrü (saat)")
+    motor_price: Optional[float] = Field(None, ge=0, description="Motor fiyatı (₺)")
+    maintenance_cost: Optional[float] = Field(None, ge=0, description="Genel bakım ücreti (₺)")
+
+
 # =============================================================================
 # CUSTOMER MODELS
 # =============================================================================
@@ -130,6 +144,16 @@ class CustomerResponse(CustomerBase):
     """Müşteri yanıt modeli."""
     id: int
     created_at: Optional[str] = None
+
+
+class CustomerUpdate(BaseModel):
+    """Müşteri güncelleme modeli - tüm alanlar opsiyonel."""
+    name: Optional[str] = Field(None, min_length=1, description="Ad Soyad")
+    company: Optional[str] = Field(None, description="Firma adı")
+    address: Optional[str] = Field(None, description="Adres")
+    phone: Optional[str] = Field(None, description="Telefon")
+    email: Optional[str] = Field(None, description="E-posta")
+    tax_number: Optional[str] = Field(None, description="Vergi numarası")
 
 
 # =============================================================================
